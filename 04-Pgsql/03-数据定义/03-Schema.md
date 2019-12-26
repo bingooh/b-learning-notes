@@ -1,0 +1,33 @@
+## Misc
+- `模式(schema)`类似命名空间，用于对数据库对象分组
+- `db->schema->object` 模式属于数据库对象，不能跨数据库实例
+- 数据库用户/角色在所有数据库实例的所有模式间共享
+- 全限定名：
+    - `db.schema.object`         : `my_db.s1.t1`
+    - `OPERATOR(schema.operator)`: `operator(pg_catalog.+)`
+- 非限定名的模式搜索路径`search_path`
+    - `set search_path to xx,xx` 
+    - 此配置参数默认值：`"$user",public`
+        - `"$user"` 与当前登录用户同名的模式
+        - `public`  数据库默认使用的模式
+    - 默认最先搜索`pg_catalog`模式
+        - 不能从搜索路径里删除此模式
+        - 如需重载运算符，可将此模式配置在搜索路径最后
+- 创建用户拥有的模式
+    - `create schema xx_schema authorization xx_user`
+    - `create schema authorization xx_user` 创建同名模式
+- `PUBLIC`角色拥有`public`模式的`usage/create`权限
+    - `usage`  允许访问模式
+    - `create` 允许在模式里创建对象 
+    - `public`:模式名称，标识符，数据库对象的默认模式 
+    - `PUBLIC`:角色名称，关键词，任何用户都属于此角色(用户组) 
+    - 以上表示任何用户读可以访问`public`模式并创建对象 
+    - `revoke create on schema public from PUBLIC` 回收权限
+- 常见用法
+    - 默认设置，使用`public`模式，适合少量用户
+    - 限制每个用户使用同名模式，删除`public`模式访问权限
+    - 第三方应用的数据库对象使用独立的模式，并将此模式授权给相关用户
+- 可移植性，其他数据库可能采用以下实现
+    - 不允许创建与拥有者不同名称的模式
+    - 模式与用户的概念相同，两者名称相同
+    - 没有模式，允许跨数据库访问名字空间

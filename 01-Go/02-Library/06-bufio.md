@@ -1,0 +1,147 @@
+## 缓冲逻辑
+- 具体的实现逻辑参考`Reader.Read()/Writer.Write()`源码
+- 约定
+    - `bufio.Reader/bufio.Writer`简写为`bufReader/bufWriter`
+    - `io.Reader/io.Writer`      简写为`ioReader/ioWriter`
+    - `bufReader/bufWriter`      内部使用的缓存称为`inbuf`
+    - `Read()/Write()`           外部传入的参数缓存称为`p`
+- `bufio`封装`io.Reader/io.Writer`,实现`Buffered I/O`
+    - `bufio`内部会分配1个`[]byte`,默认容量`4096`字节，即`inbuf`
+    - `bufReader`从`ioReader`读取数据并放入`inbuf`，外部调用者读取`inbuf`里的数据
+    - `bufWriter`把数据写入`inbuf`，直到`inbuf`满后再写入`ioWriter`
+- `bufio.Reader.Read()`实现逻辑
+    - `bufio.Reader`数据结构使用2个变量记录当前`inbuf`的读取位置
+        - `r int` 当前读取位置，在`0~r`位置的数据已被外部读取，可被覆盖
+        - `w int` 当前写入位置，在`w~len(inbuf)`的位置是可以写入的
+        - `r==w`  可被外部读取的缓存的数据为空
+        - `w-r`   可被外部读取的缓存的数据字节数，即`Buffered()`
+    - 读取数据时
+        - `Read()`每次执行，最多只调用1次`ioReader.Read()`获取数据
+        - 如果`r==w,len(p)>len(inbuf)`  即可读取的缓存数据为空，需读取的数据大于`inbuf`，则直接从`ioReader`读取
+        - 如果`r==w,len(p)<=len(inbuf)` 从`ioReader`读取数据到`inbuf`，此时`r<w`，进行下面的处理
+        - 如果`r<w,len(p)<=len(inbuf)`  即有可读取的缓存数据，且需读取的数据小于`inbuf`，则从`inbuf`读取数据
+        - 如果`w-r<len(p)`              即缓存的数据可能小于需读取的数据，可能导致`p`未填满
+    - `fill()` 私有方法，循环指定次数(默认100次)从`ioReader`读取数据到`inbuf`，直到任意1次读取到数据或报错后返回
+- `bufio.Writer.Write()`实现逻辑
+    - `bufio.Writer`数据结构使用1个变量记录当前`inbuf`的写入位置
+        - `n int`        当前写入位置，即`Buffered()`, 已写入`inbuf`的字节数
+        - `len(inbuf)-n` 可写入数据的剩余可用字节数，即`Available()`
+    - 写入数据时
+        - 如果`len(p)>Available()` 即需写入的数据大于`inbuf`的剩余可用字节数
+            - 如果`n>0` 即缓存数据不为空，则从p复制Available()个字节到inbuf，然后执行`Flush()` 
+            - 循环写入`ioWriter`直到`len(p)<Available()`，进行下一步处理
+        - 如果`len(p)<=Available()` 即需写入的数据小于`inbuf`的剩余可用字节数，则p直接写入`inbuf`
+    - `Flush()` 将`inbuf`数据写入`ioWriter`
+
+## Reader
+- `NewReader(r)/NewReaderSize(r,size)`
+    - 创建`bufio.Reader`
+    - 前者`inbuf`默认为4096字节，后者可指定`inbuf`大小
+- `Buffered()/Size()` 可读取的缓存的字节数/`len(inbuf)`
+- `Reset(r)` 重置状态，丢弃缓存数据，恢复`Reader`对象默认状态     
+- `Discard(n)`  
+    - 跳过`n`个可读取的缓存字节数
+    - 如果跳过的字节数小于`n`将返回错误
+- `Peek(n int) (buf []byte, err error)`
+    - 返回`n`个缓存的字节，但不改变`r.Buffered()`
+    - 如果`n>len(inbuf)`，则`err==ErrBufferFull`
+    - 如果`len(buf)<n`,则`err!=nil`,可能为`EOF`
+    - `buf`为`inbuf`的`slice`，下次读取时inbuf可能被覆盖，因此`buf`仅在下次读取前有效
+- `Read(p []byte) (n int, err error)`
+    - 读取数据到`p`,最多只从`ioReader`读取1次数据
+    - 返回结果可能`n<len(p)`,如果`err==EOF`,则`n==0`
+- `ReadByte()`
+    - 读取1个字节，如果无数据则返回错误 
+- `ReadRune() (r rune, size int, err error)`
+    - 读取1个`rune`，返回的`size`为`rune`的字节数
+    - 如果读取的是无效`rune`，则消耗1个字节
+        - 返回`r==unicode.ReplacementChar,size==1`
+- `UnreadByte()/UnreadRune()`
+    - 恢复最近1次读取的1个`byte/rune`,
+    - 即把最后1次读取的数据重新放回`inbuf`，以便后续读取
+    - `UnreadRune()`要求最近1次读取的数据是`rune`，否则返回错误 
+- `ReadSlice(delim byte) (line []byte, err error)`
+    - 读取数据到`line`直到匹配第1个`delim`
+    - 如果`inbuf`未读满且未匹配到`delim`，则调用`fill()`后再匹配
+    - 如果`inbuf`已满且未匹配到`delim`，则`err==ErrBufferFull`
+    - 如果读取`ioReader`时返回错误(一般为`EOF`)，则`err!=nil`
+    - 如果最终未匹配到`delim`，则读取`inbuf`已有数据到`line`
+    - 如果返回的`line`不包含`delim`，则`err!=nil`
+    - 返回的`line`是`inbuf`的`slice`，在下次读取前可能被覆盖
+- `ReadBytes(delim byte) ([]byte, error)`
+    - 同`ReadSlice()`，但返回的是复制inbuf的数据 
+- `ReadString(delim byte) (string, error)`
+    - 同`ReadSlice()`，但返回的是复制inbuf的数据 
+- `ReadLine() (line []byte, isPrefix bool, err error)`
+    - 底层方法，建议使用`ReadBytes('\n')/ReadString('\n')`
+    - 此方法返回1条字符串，但不包括字符串结束符`\r\n`或`\n`
+    - `line`是`inbuf`的`slice`，在下次读取前可能被覆盖
+    - 如果字符串长度大于`len(inbuf)`，则`prefix==true`
+        - 即返回的是字符串前缀部分
+        - 后面应连续调用，直到`prefix==false`
+        - 调用者应复制并拼接每次调用返回的`line`以获取完整的字符串
+    - 调用`UnreadByte()`可把字符串结束符号放回`inbuf`
+- `WriteTo(w)` 写入所有数据到`w`，可能不经过`inbuf`
+
+## Writer
+- `NewWriter(w)/NewWriterSize(w,size)`
+    - 创建`bufio.Writer`
+    - 前者`inbuf`默认为4096字节，后者可指定`inbuf`大小
+- `Buffered()/Available()/Size()` 已缓存的字节数/`inbuf`未使用的字节数/`len(inbuf)`
+- `Reset(r)` 重置状态，丢弃缓存数据，恢复`Writer`对象默认状态
+- `Flush()` 把`inbuf`数据写入`ioWriter`
+- `Write(p []byte) (nn int, err error)`
+    - 把`p`写入`inbuf`，如果返回的`nn<len(p)`,则`err!=nil` 
+- `WriteByte(c byte) error` 写入1个字节
+- `WriteRune(r rune) (size int, err error)` 
+    - 写入1个`rune`，返回写入的字节数
+- `WriteString(s string) (n int, error)`
+    - 写入1个字符串，如果返回的`n<len()`,则`err!=nil`  
+- `ReadFrom(r)` 读取`r`所有数据，可能不经过`inbuf`
+
+## SplitFunc
+- `type SplitFunc func(data []byte, atEOF bool) (advance int, token []byte, err error)`
+- `SplitFunc`负责从data查找需要匹配的数据，并作为token返回。举例：
+    - `Scanner`从`ioReader`读取数据到`inbuf`，假设数据为`1,2,`
+    - `inbuf`作为`data`参数传给`SplitFunc`查找`token`
+    - 假设`SplitFunc`算法是以`,`作为分隔符，分隔符之间的数据即为`token`
+    - 第1次查找返回`2,1,nil`，表示读取了2字节，token==1，err==nil
+    - `Scanner`收到结果后，会`“步进”`2字节，此时`inbuf`数据为`2,`,进行第2次查找
+    - 第2次查找返回`2,2,nil`,`Scanner`再步进2字节，`inbuf`数据为空，即`len(buf)==0`
+    - 第3次查找返回`0,data,ErrFinalToken`，因为返回了错误，`Scanner`将停止后续查找
+    - 如果ioReader返回EOF，则参数`atEOF==true`
+    - `data`,`token`都是`inbuf`的`slice`
+- 标准库提供的`SplitFunc`实现
+    - `ScanBytes()` 1个`byte`作为1个`token` 
+    - `ScanRunes()` 1个`rune`作为1个`token`，无效`rune`返回`utf8.RuneError`
+    - `ScanWords()` 1个单词作为1个`token`，以空格为分隔符
+    - `ScanLines()` 1个字符串作为1个`token`，以`\n`,`\r\n`为分割符
+
+## Scanner
+- `Scan() bool`
+    - 此方法会调用`SplitFunc`查找下1个`token`
+    - 找到的`token`可调用`Bytes()/Text()`获取
+    - 找到`token`返回`true`，否则返回`false`
+    - 如果查找时出错，则停止后续查找，即后续调用`Scan()`将直接返回`false`
+    - 如果多次(默认100次)调用`SplitFunc`都未获取`token`(返回空`token`)，则抛出`panic`
+    - 如果`len(token)>max(inbuf)`，则将返回`ErrTooLong`
+- `Bytes()`
+    - 获取最近1次找到的`token`
+    - `token`是`inbuf`的`slice`，下次扫描时可能被覆盖，所以`token`仅在下次扫描前有效
+- `Text()`
+    - 复制最近1次找到的`token`并封装为`string`返回
+- `Err()`
+    - 获取扫描时返回的`error`
+    - 以下情况`Scanner`将停止后续扫描，但是`Err()`返回`nil`
+        - `ioReader`  返回`EOF`，表示没有更多数据可读取
+        - `SplitFunc` 返回`ErrFinalToken`，表示没有更多`token`可返回
+- `NewScanner(r)`
+    - 创建`Scanner`
+    - 默认`SplitFunc`为`ScanLines()`
+    - 默认inbuf初始化大小4KB，最大64KB(`MaxScanTokenSize`)
+    - 扫描时，如果`SplitFunc`返回空token并且`cap(inbuf)<MaxScanTokenSize`,
+      则会读取更多数据到inbuf，然后传给`SplitFunc`进行下次查找
+- `Buffer(buf []byte, max int)`
+    - 设置`inbuf`的初始及最大字节数
+- `Split(split SplitFunc)`
+    - 设置`Scanner`的`SplitFunc`
